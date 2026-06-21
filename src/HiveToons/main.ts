@@ -383,42 +383,12 @@ export class HiveToonsExtension
     async getChapters(sourceManga: SourceManga): Promise<Chapter[]> {
         const postId = await this.resolvePostId(sourceManga.mangaId);
         const perPage = 100;
+        const seen = new Set<string>();
+        const chapters: Chapter[] = [];
+        let page = 1;
+        let hasMore = true;
 
-        const firstUrl = new URLBuilder(HT_API_DOMAIN)
-            .addPath("api")
-            .addPath("chapters")
-            .addQuery("postId", postId)
-            .addQuery("page", 1)
-            .addQuery("per_page", perPage)
-            .build();
-
-        const [_, firstBuffer] = await Application.scheduleRequest({
-            url: firstUrl,
-            method: "GET",
-        });
-
-        const firstJson: HiveToonsChaptersResponse = JSON.parse(
-            Application.arrayBufferToUTF8String(firstBuffer),
-        );
-
-        if (!firstJson.post?.chapters || firstJson.post.chapters.length === 0) {
-            return [];
-        }
-
-        const chapters: Chapter[] = firstJson.post.chapters.map((ch) =>
-            this.mapChapter(ch, sourceManga),
-        );
-
-        if (firstJson.post.chapters.length < perPage) {
-            return chapters;
-        }
-
-        const cachedPost = this.getCachedPost(sourceManga.mangaId);
-        const totalChapters = cachedPost?._count.chapters ?? perPage * 10;
-        const totalPages = Math.ceil(totalChapters / perPage);
-
-        const pagePromises: Promise<Chapter[]>[] = [];
-        for (let page = 2; page <= totalPages; page++) {
+        while (hasMore) {
             const url = new URLBuilder(HT_API_DOMAIN)
                 .addPath("api")
                 .addPath("chapters")
@@ -427,24 +397,32 @@ export class HiveToonsExtension
                 .addQuery("per_page", perPage)
                 .build();
 
-            pagePromises.push(
-                Application.scheduleRequest({ url, method: "GET" }).then(
-                    ([, buffer]) => {
-                        const json: HiveToonsChaptersResponse = JSON.parse(
-                            Application.arrayBufferToUTF8String(buffer),
-                        );
-                        if (!json.post?.chapters) return [];
-                        return json.post.chapters.map((ch) =>
-                            this.mapChapter(ch, sourceManga),
-                        );
-                    },
-                ),
-            );
-        }
+            const [_, buffer] = await Application.scheduleRequest({
+                url,
+                method: "GET",
+            });
 
-        const pageResults = await Promise.all(pagePromises);
-        for (const pageChapters of pageResults) {
-            chapters.push(...pageChapters);
+            const json: HiveToonsChaptersResponse = JSON.parse(
+                Application.arrayBufferToUTF8String(buffer),
+            );
+
+            if (!json.post?.chapters || json.post.chapters.length === 0) {
+                break;
+            }
+
+            let newCount = 0;
+            for (const ch of json.post.chapters) {
+                if (seen.has(ch.slug)) continue;
+                seen.add(ch.slug);
+                chapters.push(this.mapChapter(ch, sourceManga));
+                newCount++;
+            }
+
+            if (newCount === 0 || json.post.chapters.length < perPage) {
+                hasMore = false;
+            } else {
+                page++;
+            }
         }
 
         return chapters;
