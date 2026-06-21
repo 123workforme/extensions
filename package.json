@@ -1,0 +1,22 @@
+{
+    "name": "hivetoons-extension",
+    "private": true,
+    "description": "Paperback extension for HiveToons.",
+    "type": "module",
+    "scripts": {
+        "tsc": "tsc",
+        "bundle": "paperback-cli bundle",
+        "serve": "paperback-cli serve",
+        "dev": "paperback-cli serve --watch"
+    },
+    "dependencies": {
+        "@paperback/runtime-polyfills": "^1.0.0-alpha.87"
+    },
+    "devDependencies": {
+        "@paperback/toolchain": "^1.0.0-alpha.87",
+        "@paperback/types": "^1.0.0-alpha.87",
+        "cheerio": "^1.2.0",
+        "typescript": "^5.9.3"
+    },
+    "repositoryName": "HiveToons Extensions (0.9)"
+}
