@@ -55,10 +55,21 @@ export class HiveToonsExtension
     private cachePost(post: HiveToonsPost): void {
         Application.setState(post.slug, `slug_${post.id}`);
         Application.setState(post.id, `id_${post.slug}`);
+        Application.setState(JSON.stringify(post), `post_${post.id}`);
     }
 
     private getCachedSlug(postId: string): string | undefined {
         return Application.getState(`slug_${postId}`) as string | undefined;
+    }
+
+    private getCachedPost(postId: string): HiveToonsPost | undefined {
+        const raw = Application.getState(`post_${postId}`) as string | undefined;
+        if (!raw) return undefined;
+        try {
+            return JSON.parse(raw) as HiveToonsPost;
+        } catch {
+            return undefined;
+        }
     }
 
     async getDiscoverSections(): Promise<DiscoverSection[]> {
@@ -204,29 +215,14 @@ export class HiveToonsExtension
     }
 
     async getMangaDetails(mangaId: string): Promise<SourceManga> {
-        const slug = await this.resolveSlug(mangaId);
+        const post = await this.fetchPost(mangaId);
 
-        const url = new URLBuilder(HT_API_DOMAIN)
-            .addPath("api")
-            .addPath("posts")
-            .addQuery("slug", slug)
-            .build();
-
-        const [_, buffer] = await Application.scheduleRequest({
-            url,
-            method: "GET",
-        });
-
-        const json: HiveToonsPostsResponse = JSON.parse(
-            Application.arrayBufferToUTF8String(buffer),
-        );
-
-        const post = json.posts[0];
         if (!post) {
             throw new Error(`Series not found: ${mangaId}`);
         }
 
         this.cachePost(post);
+        const slug = post.slug;
 
         const altTitles = post.alternativeTitles
             ? post.alternativeTitles
@@ -238,7 +234,7 @@ export class HiveToonsExtension
         let synopsis = "";
         try {
             const [, pageBuffer] = await Application.scheduleRequest({
-                url: `${HT_DOMAIN}/series/${slug}`,
+                url: `${HT_DOMAIN}/series/${encodeURI(slug)}`,
                 method: "GET",
             });
             const html = Application.arrayBufferToUTF8String(pageBuffer);
@@ -246,7 +242,15 @@ export class HiveToonsExtension
                 /<meta\s+name="description"\s+content="([^"]*)"/,
             );
             if (descMatch?.[1]) {
-                synopsis = descMatch[1];
+                synopsis = descMatch[1]
+                    .replace(/<[^>]*>/g, "")
+                    .replace(/&amp;/g, "&")
+                    .replace(/&lt;/g, "<")
+                    .replace(/&gt;/g, ">")
+                    .replace(/&quot;/g, '"')
+                    .replace(/&#x27;/g, "'")
+                    .replace(/&#39;/g, "'")
+                    .trim();
             }
         } catch {
             // Fallback: no synopsis
@@ -275,6 +279,57 @@ export class HiveToonsExtension
                 shareUrl: `${HT_DOMAIN}/series/${slug}`,
             },
         };
+    }
+
+    private async fetchPost(mangaId: string): Promise<HiveToonsPost | undefined> {
+        const cached = this.getCachedPost(mangaId);
+        if (cached) return cached;
+
+        const postId = Number(mangaId);
+        const slug = this.getCachedSlug(mangaId);
+
+        const url = new URLBuilder(HT_API_DOMAIN)
+            .addPath("api")
+            .addPath("posts")
+            .addQuery("page", 1)
+            .addQuery("per_page", 50)
+            .addQuery("orderBy", "latest")
+            .build();
+
+        const [_, buffer] = await Application.scheduleRequest({ url, method: "GET" });
+        const json: HiveToonsPostsResponse = JSON.parse(
+            Application.arrayBufferToUTF8String(buffer),
+        );
+
+        for (const p of json.posts) {
+            this.cachePost(p);
+            if (p.id === postId || p.slug === slug) return p;
+        }
+
+        let page = 2;
+        const totalPages = Math.ceil(json.totalCount / 50);
+        while (page <= totalPages) {
+            const pageUrl = new URLBuilder(HT_API_DOMAIN)
+                .addPath("api")
+                .addPath("posts")
+                .addQuery("page", page)
+                .addQuery("per_page", 50)
+                .addQuery("orderBy", "latest")
+                .build();
+
+            const [, buf] = await Application.scheduleRequest({ url: pageUrl, method: "GET" });
+            const pageJson: HiveToonsPostsResponse = JSON.parse(
+                Application.arrayBufferToUTF8String(buf),
+            );
+
+            for (const p of pageJson.posts) {
+                this.cachePost(p);
+                if (p.id === postId || p.slug === slug) return p;
+            }
+            page++;
+        }
+
+        return undefined;
     }
 
     private mapStatus(status: string): string {
