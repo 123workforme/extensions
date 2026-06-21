@@ -29,6 +29,16 @@ import pbconfig from "./pbconfig";
 
 import * as cheerio from "cheerio";
 
+function sanitizeId(slug: string): string {
+    return slug.replace(/[^a-zA-Z0-9._\-@()\[\]%?#+=/:]/g, (ch) =>
+        encodeURIComponent(ch),
+    );
+}
+
+function desanitizeId(id: string): string {
+    return decodeURIComponent(id);
+}
+
 export class HiveToonsExtension
     implements
         Extension,
@@ -102,7 +112,7 @@ export class HiveToonsExtension
                     items.push({
                         imageUrl: post.featuredImage,
                         title: post.postTitle,
-                        mangaId: post.slug,
+                        mangaId: sanitizeId(post.slug),
                         chapterId: latestChapter?.slug ?? "",
                         subtitle: latestChapter
                             ? `Chapter ${latestChapter.number}`
@@ -139,7 +149,7 @@ export class HiveToonsExtension
                     items.push({
                         imageUrl: post.featuredImage,
                         title: post.postTitle,
-                        mangaId: post.slug,
+                        mangaId: sanitizeId(post.slug),
                         subtitle: latestChapter
                             ? `Chapter ${latestChapter.number}`
                             : undefined,
@@ -187,14 +197,15 @@ export class HiveToonsExtension
     }
 
     getMangaShareUrl(mangaId: string): string {
-        return `${HT_DOMAIN}/series/${mangaId}`;
+        return `${HT_DOMAIN}/series/${desanitizeId(mangaId)}`;
     }
 
     async getMangaDetails(mangaId: string): Promise<SourceManga> {
+        const slug = desanitizeId(mangaId);
         const url = new URLBuilder(HT_API_DOMAIN)
             .addPath("api")
             .addPath("posts")
-            .addQuery("slug", mangaId)
+            .addQuery("slug", slug)
             .build();
 
         const [_, buffer] = await Application.scheduleRequest({
@@ -221,7 +232,7 @@ export class HiveToonsExtension
         let synopsis = "";
         try {
             const [, pageBuffer] = await Application.scheduleRequest({
-                url: `${HT_DOMAIN}/series/${mangaId}`,
+                url: `${HT_DOMAIN}/series/${slug}`,
                 method: "GET",
             });
             const html = Application.arrayBufferToUTF8String(pageBuffer);
@@ -255,7 +266,7 @@ export class HiveToonsExtension
                 synopsis,
                 thumbnailUrl: post.featuredImage,
                 contentRating: pbconfig.contentRating,
-                shareUrl: `${HT_DOMAIN}/series/${mangaId}`,
+                shareUrl: `${HT_DOMAIN}/series/${slug}`,
             },
         };
     }
@@ -276,7 +287,8 @@ export class HiveToonsExtension
     }
 
     async getChapters(sourceManga: SourceManga): Promise<Chapter[]> {
-        const postId = await this.getPostId(sourceManga.mangaId);
+        const slug = desanitizeId(sourceManga.mangaId);
+        const postId = await this.getPostId(slug);
         const chapters: Chapter[] = [];
         let page = 1;
         let hasMore = true;
@@ -332,7 +344,8 @@ export class HiveToonsExtension
     }
 
     async getChapterDetails(chapter: Chapter): Promise<ChapterDetails> {
-        const url = `${HT_DOMAIN}/series/${chapter.sourceManga.mangaId}/${chapter.chapterId}`;
+        const slug = desanitizeId(chapter.sourceManga.mangaId);
+        const url = `${HT_DOMAIN}/series/${slug}/${chapter.chapterId}`;
 
         const [_, buffer] = await Application.scheduleRequest({
             url,
@@ -405,7 +418,7 @@ export class HiveToonsExtension
             items.push({
                 imageUrl: post.featuredImage,
                 title: post.postTitle,
-                mangaId: post.slug,
+                mangaId: sanitizeId(post.slug),
                 subtitle: latestChapter
                     ? `Chapter ${latestChapter.number}`
                     : `${post._count.chapters} chapters`,
