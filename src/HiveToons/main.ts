@@ -238,20 +238,7 @@ export class HiveToonsExtension
                 method: "GET",
             });
             const html = Application.arrayBufferToUTF8String(pageBuffer);
-            const descMatch = html.match(
-                /<meta\s+name="description"\s+content="([^"]*)"/,
-            );
-            if (descMatch?.[1]) {
-                synopsis = descMatch[1]
-                    .replace(/<[^>]*>/g, "")
-                    .replace(/&amp;/g, "&")
-                    .replace(/&lt;/g, "<")
-                    .replace(/&gt;/g, ">")
-                    .replace(/&quot;/g, '"')
-                    .replace(/&#x27;/g, "'")
-                    .replace(/&#39;/g, "'")
-                    .trim();
-            }
+            synopsis = this.extractSynopsis(html);
         } catch {
             // Fallback: no synopsis
         }
@@ -279,6 +266,52 @@ export class HiveToonsExtension
                 shareUrl: `${HT_DOMAIN}/series/${slug}`,
             },
         };
+    }
+
+    private extractSynopsis(html: string): string {
+        const $ = cheerio.load(html);
+
+        const descIsland = $('astro-island').filter((_, el) => {
+            const opts = $(el).attr('opts') ?? '';
+            return opts.includes('SeriesDescriptionIsland');
+        });
+
+        if (descIsland.length > 0) {
+            const props = descIsland.attr('props') ?? '';
+            const match = props.match(/"postContent":\[0,"((?:[^"\\]|\\.)*)"\]/);
+            if (match?.[1]) {
+                let content = match[1]
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\"/g, '"')
+                    .replace(/\\\\/g, '\\');
+
+                content = content
+                    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+                    .replace(/---/g, '')
+                    .replace(/<[^>]*>/g, '')
+                    .replace(/\n{3,}/g, '\n\n')
+                    .trim();
+
+                if (content) return content;
+            }
+        }
+
+        const descMatch = html.match(
+            /<meta\s+name="description"\s+content="([^"]*)"/,
+        );
+        if (descMatch?.[1]) {
+            return descMatch[1]
+                .replace(/<[^>]*>/g, "")
+                .replace(/&amp;/g, "&")
+                .replace(/&lt;/g, "<")
+                .replace(/&gt;/g, ">")
+                .replace(/&quot;/g, '"')
+                .replace(/&#x27;/g, "'")
+                .replace(/&#39;/g, "'")
+                .trim();
+        }
+
+        return "";
     }
 
     private async fetchPost(mangaId: string): Promise<HiveToonsPost | undefined> {
@@ -349,42 +382,69 @@ export class HiveToonsExtension
 
     async getChapters(sourceManga: SourceManga): Promise<Chapter[]> {
         const postId = await this.resolvePostId(sourceManga.mangaId);
-        const chapters: Chapter[] = [];
-        let page = 1;
-        let hasMore = true;
+        const perPage = 100;
 
-        while (hasMore) {
+        const firstUrl = new URLBuilder(HT_API_DOMAIN)
+            .addPath("api")
+            .addPath("chapters")
+            .addQuery("postId", postId)
+            .addQuery("page", 1)
+            .addQuery("per_page", perPage)
+            .build();
+
+        const [_, firstBuffer] = await Application.scheduleRequest({
+            url: firstUrl,
+            method: "GET",
+        });
+
+        const firstJson: HiveToonsChaptersResponse = JSON.parse(
+            Application.arrayBufferToUTF8String(firstBuffer),
+        );
+
+        if (!firstJson.post?.chapters || firstJson.post.chapters.length === 0) {
+            return [];
+        }
+
+        const chapters: Chapter[] = firstJson.post.chapters.map((ch) =>
+            this.mapChapter(ch, sourceManga),
+        );
+
+        if (firstJson.post.chapters.length < perPage) {
+            return chapters;
+        }
+
+        const cachedPost = this.getCachedPost(sourceManga.mangaId);
+        const totalChapters = cachedPost?._count.chapters ?? perPage * 10;
+        const totalPages = Math.ceil(totalChapters / perPage);
+
+        const pagePromises: Promise<Chapter[]>[] = [];
+        for (let page = 2; page <= totalPages; page++) {
             const url = new URLBuilder(HT_API_DOMAIN)
                 .addPath("api")
                 .addPath("chapters")
                 .addQuery("postId", postId)
                 .addQuery("page", page)
-                .addQuery("per_page", 100)
+                .addQuery("per_page", perPage)
                 .build();
 
-            const [_, buffer] = await Application.scheduleRequest({
-                url,
-                method: "GET",
-            });
-
-            const json: HiveToonsChaptersResponse = JSON.parse(
-                Application.arrayBufferToUTF8String(buffer),
+            pagePromises.push(
+                Application.scheduleRequest({ url, method: "GET" }).then(
+                    ([, buffer]) => {
+                        const json: HiveToonsChaptersResponse = JSON.parse(
+                            Application.arrayBufferToUTF8String(buffer),
+                        );
+                        if (!json.post?.chapters) return [];
+                        return json.post.chapters.map((ch) =>
+                            this.mapChapter(ch, sourceManga),
+                        );
+                    },
+                ),
             );
+        }
 
-            if (!json.post?.chapters || json.post.chapters.length === 0) {
-                hasMore = false;
-                break;
-            }
-
-            for (const chapter of json.post.chapters) {
-                chapters.push(this.mapChapter(chapter, sourceManga));
-            }
-
-            if (json.post.chapters.length < 100) {
-                hasMore = false;
-            } else {
-                page++;
-            }
+        const pageResults = await Promise.all(pagePromises);
+        for (const pageChapters of pageResults) {
+            chapters.push(...pageChapters);
         }
 
         return chapters;
