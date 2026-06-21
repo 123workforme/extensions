@@ -23,21 +23,12 @@ import type {
     HiveToonsChapterDetail,
     HiveToonsChaptersResponse,
     HiveToonsMetadata,
+    HiveToonsPost,
     HiveToonsPostsResponse,
 } from "./interfaces";
 import pbconfig from "./pbconfig";
 
 import * as cheerio from "cheerio";
-
-function sanitizeId(slug: string): string {
-    return slug.replace(/[^a-zA-Z0-9._\-@()\[\]%?#+=/:]/g, (ch) =>
-        encodeURIComponent(ch),
-    );
-}
-
-function desanitizeId(id: string): string {
-    return decodeURIComponent(id);
-}
 
 export class HiveToonsExtension
     implements
@@ -59,6 +50,15 @@ export class HiveToonsExtension
         this.globalRateLimiter.registerInterceptor();
         this.requestManager.registerInterceptor();
         if (Application.isResourceLimited) return;
+    }
+
+    private cachePost(post: HiveToonsPost): void {
+        Application.setState(post.slug, `slug_${post.id}`);
+        Application.setState(post.id, `id_${post.slug}`);
+    }
+
+    private getCachedSlug(postId: string): string | undefined {
+        return Application.getState(`slug_${postId}`) as string | undefined;
     }
 
     async getDiscoverSections(): Promise<DiscoverSection[]> {
@@ -108,11 +108,12 @@ export class HiveToonsExtension
 
                 for (const post of json.posts) {
                     if (post.isNovel) continue;
+                    this.cachePost(post);
                     const latestChapter = post.chapters[0];
                     items.push({
                         imageUrl: post.featuredImage,
                         title: post.postTitle,
-                        mangaId: sanitizeId(post.slug),
+                        mangaId: post.id.toString(),
                         chapterId: latestChapter?.slug ?? "",
                         subtitle: latestChapter
                             ? `Chapter ${latestChapter.number}`
@@ -145,11 +146,12 @@ export class HiveToonsExtension
 
                 for (const post of json.posts) {
                     if (post.isNovel) continue;
+                    this.cachePost(post);
                     const latestChapter = post.chapters[0];
                     items.push({
                         imageUrl: post.featuredImage,
                         title: post.postTitle,
-                        mangaId: sanitizeId(post.slug),
+                        mangaId: post.id.toString(),
                         subtitle: latestChapter
                             ? `Chapter ${latestChapter.number}`
                             : undefined,
@@ -197,11 +199,13 @@ export class HiveToonsExtension
     }
 
     getMangaShareUrl(mangaId: string): string {
-        return `${HT_DOMAIN}/series/${desanitizeId(mangaId)}`;
+        const slug = this.getCachedSlug(mangaId) ?? mangaId;
+        return `${HT_DOMAIN}/series/${slug}`;
     }
 
     async getMangaDetails(mangaId: string): Promise<SourceManga> {
-        const slug = desanitizeId(mangaId);
+        const slug = await this.resolveSlug(mangaId);
+
         const url = new URLBuilder(HT_API_DOMAIN)
             .addPath("api")
             .addPath("posts")
@@ -221,6 +225,8 @@ export class HiveToonsExtension
         if (!post) {
             throw new Error(`Series not found: ${mangaId}`);
         }
+
+        this.cachePost(post);
 
         const altTitles = post.alternativeTitles
             ? post.alternativeTitles
@@ -287,8 +293,7 @@ export class HiveToonsExtension
     }
 
     async getChapters(sourceManga: SourceManga): Promise<Chapter[]> {
-        const slug = desanitizeId(sourceManga.mangaId);
-        const postId = await this.getPostId(slug);
+        const postId = await this.resolvePostId(sourceManga.mangaId);
         const chapters: Chapter[] = [];
         let page = 1;
         let hasMore = true;
@@ -344,7 +349,7 @@ export class HiveToonsExtension
     }
 
     async getChapterDetails(chapter: Chapter): Promise<ChapterDetails> {
-        const slug = desanitizeId(chapter.sourceManga.mangaId);
+        const slug = await this.resolveSlug(chapter.sourceManga.mangaId);
         const url = `${HT_DOMAIN}/series/${slug}/${chapter.chapterId}`;
 
         const [_, buffer] = await Application.scheduleRequest({
@@ -414,11 +419,12 @@ export class HiveToonsExtension
 
         for (const post of json.posts) {
             if (post.isNovel) continue;
+            this.cachePost(post);
             const latestChapter = post.chapters[0];
             items.push({
                 imageUrl: post.featuredImage,
                 title: post.postTitle,
-                mangaId: sanitizeId(post.slug),
+                mangaId: post.id.toString(),
                 subtitle: latestChapter
                     ? `Chapter ${latestChapter.number}`
                     : `${post._count.chapters} chapters`,
@@ -438,14 +444,17 @@ export class HiveToonsExtension
         ];
     }
 
-    private async getPostId(slug: string): Promise<number> {
-        const cached = Application.getState(`postId_${slug}`) as number | undefined;
+    private async resolvePostId(mangaId: string): Promise<number> {
+        const asNum = Number(mangaId);
+        if (!Number.isNaN(asNum) && asNum > 0) return asNum;
+
+        const cached = Application.getState(`id_${mangaId}`) as number | undefined;
         if (cached) return cached;
 
         const url = new URLBuilder(HT_API_DOMAIN)
             .addPath("api")
             .addPath("posts")
-            .addQuery("slug", slug)
+            .addQuery("slug", mangaId)
             .build();
 
         const [_, buffer] = await Application.scheduleRequest({
@@ -458,12 +467,44 @@ export class HiveToonsExtension
         );
 
         const post = json.posts[0];
-        if (!post) {
-            throw new Error(`Could not find post ID for slug: ${slug}`);
+        if (!post) throw new Error(`Could not resolve post ID for: ${mangaId}`);
+
+        this.cachePost(post);
+        return post.id;
+    }
+
+    private async resolveSlug(mangaId: string): Promise<string> {
+        const cached = this.getCachedSlug(mangaId);
+        if (cached) return cached;
+
+        const asNum = Number(mangaId);
+        if (!Number.isNaN(asNum) && asNum > 0) {
+            const url = new URLBuilder(HT_API_DOMAIN)
+                .addPath("api")
+                .addPath("chapters")
+                .addQuery("postId", asNum)
+                .addQuery("page", 1)
+                .addQuery("per_page", 1)
+                .build();
+
+            const [_, buffer] = await Application.scheduleRequest({
+                url,
+                method: "GET",
+            });
+
+            const json: HiveToonsChaptersResponse = JSON.parse(
+                Application.arrayBufferToUTF8String(buffer),
+            );
+
+            const slug = json.post?.chapters?.[0]?.mangaPost?.slug;
+            if (slug) {
+                Application.setState(slug, `slug_${mangaId}`);
+                Application.setState(asNum, `id_${slug}`);
+                return slug;
+            }
         }
 
-        Application.setState(post.id, `postId_${slug}`);
-        return post.id;
+        return mangaId;
     }
 }
 
